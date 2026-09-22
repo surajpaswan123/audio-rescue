@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+
+# User data and downloads
+Audio-Rescue/
+Downloads/
+*.part
+.audio_rescue_manifest.json
+.audio_rescue_manifest_*.tmp
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.ogg
+*.aac
+*.mp4
+
+# Editors / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
