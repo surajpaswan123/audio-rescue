@@ -1,0 +1,11 @@
+eq('/api/start',body,origin=self.base)
+        self.assertEqual(status,400)
+        self.assertIn('expired',obj['error'])
+    def test_parallel_start_no_deadlock(self):
+        a.report(status='running')
+        status,obj=self.req('/api/start',{'mode':'flow','token':'FAKE','urls':FLOW_URL,'format':'wav'},origin=self.base)
+        self.assertEqual(status,409)
+        self.assertIn('already running',obj['error'])
+
+
+if __name__=='__main__':unittest.main(verbosity=2)
