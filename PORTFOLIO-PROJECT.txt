@@ -1,0 +1,55 @@
+PROJECT: AUDIO RESCUE
+=====================
+Category: Accessibility / desktop utility / audio tooling
+Built with: Python 3.10+ standard library, HTML, CSS and JavaScript
+Platform: Windows and local web browser (127.0.0.1)
+
+ONE-LINE SUMMARY
+----------------
+An accessible, local audio download manager that batches authorized
+Flow Music exports and direct HTTPS audio downloads with safer file
+handling and beginner-friendly instructions.
+
+THE PROBLEM
+-----------
+A music service delivered a WAV file successfully at the HTTP layer,
+but its browser download interface failed while reading the response.
+Managing multiple songs manually through a technical browser tool was
+especially inconvenient with a screen reader.
+
+THE SOLUTION
+------------
+I turned the individual workaround into Audio Rescue: a local app with
+labeled controls and step-by-step documentation. Users can paste song
+links, select an available format, download batches, and inspect results
+without repeatedly working in Developer Tools. Other platforms are
+supported when they expose direct authorized audio links or documented
+file URL templates.
+
+ENGINEERING DETAILS
+-------------------
+- Local multithreaded HTTP server with strict same-origin write rules.
+- HTTPS download client; exact-host Bearer token restriction and secure
+  redirect policy.
+- Streaming downloads, small fixed memory footprint, progress and Stop.
+- Retry for transient errors; validation of audio magic bytes, HTTP
+  body length and RIFF WAV structure.
+- SHA-256 inventory for completed files, safe numbered collision names,
+  temporary files, and no overwriting of existing user audio.
+- No external Python package dependencies.
+- Interface includes semantic labels, headings and ARIA status text.
+
+QUALITY ASSURANCE
+-----------------
+40 offline regression tests passed. See QA-REPORT.txt. Real-account and
+hands-on Windows/NVDA testing remain part of the release checklist.
+
+SCOPE / ETHICS
+--------------
+Audio Rescue downloads only content a user is authorized to obtain. It
+does not grant premium export rights, evade subscriptions, or transform
+lossy MP3 into a genuine source WAV. Tokens must remain private.
+
+Suggested demonstration: a small authorized batch with one successful
+original WAV export, one already-present skip, and one deliberate wrong
+format or expired-token error (without showing actual credentials).
