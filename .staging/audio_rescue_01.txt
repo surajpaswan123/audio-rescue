@@ -1,0 +1,149 @@
+init__(self, authorized_host: str):
+        self.authorized_host = authorized_host
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if self.authorized_host and hostname(newurl) != self.authorized_host:
+            raise DownloadError('Download redirected to another site; no token was forwarded. Use a direct link on that site without this token.')
+        if not hostname(newurl):
+            raise DownloadError('Download redirected to a non-HTTPS URL; refused.')
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def detect_format(header: bytes, ctype: str, url: str, desired: str | None) -> str:
+    if header[:4] == b'RIFF' and header[8:12] == b'WAVE': return 'wav'
+    if header[:4] == b'RF64' and header[8:12] == b'WAVE': return 'wav'
+    if header[:4] == b'fLaC': return 'flac'
+    if header[:4] == b'OggS': return 'ogg'
+    if len(header)>=12 and header[4:8]==b'ftyp':
+        return 'mp4' if desired == 'mp4' or 'video/mp4' in ctype else 'm4a'
+    if header[:3] == b'ID3': return 'mp3'
+    if len(header)>=2 and header[0]==0xff and header[1]&0xf0==0xf0 and header[1]&0x06==0: return 'aac'
+    if len(header)>=2 and header[0]==0xff and header[1]&0xe0==0xe0 and header[1]&0x06: return 'mp3'
+    return ''
+
+
+def token_is_expired(token: str) -> bool:
+    """Only decode the public expiration claim; no signature/permissions validation."""
+    try:
+        parts = token.split('.')
+        if len(parts) != 3: return False  # opaque provider token
+        body=parts[1].replace('-','+').replace('_','/')
+        body+='='*((-len(body))%4)
+        obj=json.loads(base64.b64decode(body))
+        exp=obj.get('exp')
+        return isinstance(exp,(int,float)) and not isinstance(exp,bool) and exp < time.time()+45
+    except (ValueError,UnicodeError,TypeError):
+        return False
+
+
+def dest_path(folder: Path, item: Item, fmt: str) -> Path:
+    base = f'{item.label} [{item.file_id}]' if item.label != item.file_id else item.file_id
+    return folder / f'{base}.{fmt}'
+
+
+def manifest_path(folder: Path) -> Path:
+    return folder / '.audio_rescue_manifest.json'
+
+
+def manifest_load(folder: Path) -> dict:
+    try:
+        obj = json.loads(manifest_path(folder).read_text(encoding='utf-8'))
+        return obj if isinstance(obj, dict) else {}
+    except (OSError, ValueError, UnicodeError):
+        return {}
+
+
+def manifest_save(folder: Path, obj: dict) -> None:
+    # No tokens, cookies or original signed URLs are written here.
+    temp = folder / f'.audio_rescue_manifest_{secrets.token_hex(8)}.tmp'
+    try:
+        temp.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding='utf-8')
+        os.replace(temp, manifest_path(folder))
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def file_digest(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open('rb') as fh:
+        while block := fh.read(1024*1024):
+            h.update(block)
+    return h.hexdigest()
+
+
+def valid_existing(path: Path, item: Item, fmt: str, meta: dict | None) -> bool:
+    try:
+        size = path.stat().st_size
+        if size <= 44 or size > MAX_AUDIO: return False
+        with path.open('rb') as fh: header = fh.read(32)
+        if detect_format(header, '', item.url, fmt) != fmt: return False
+        if isinstance(meta, dict):
+            return (meta.get('source') == hashlib.sha256(item.url.encode()).hexdigest()
+                    and meta.get('size') == size and meta.get('sha256') == file_digest(path))
+        # Legacy WAV: the RIFF header gives us a trustworthy length check.
+        if fmt == 'wav' and header[:4] == b'RIFF':
+            declared = int.from_bytes(header[4:8], 'little') + 8
+            return declared >= 44 and declared == size
+        return False
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def unused_path(target: Path) -> Path:
+    if not target.exists(): return target
+    for n in range(2, 10001):
+        proposal = target.with_name(f'{target.stem} ({n}){target.suffix}')
+        if not proposal.exists(): return proposal
+    raise DownloadError('Too many files with the same name in the selected folder.')
+
+
+def download_one(item: Item, folder: Path, token: str, auth_host: str, cancel: threading.Event) -> tuple[str,str]:
+    if token and hostname(item.url) != auth_host:
+        raise DownloadError('Token not sent: download hostname differs from the chosen authorized hostname.')
+    manifest = manifest_load(folder)
+    if item.fmt:
+        target = dest_path(folder,item,item.fmt)
+        if target.is_file() and valid_existing(target,item,item.fmt,manifest.get(target.name)):
+            return 'Skipped', ('Existing audio passed SHA-256 integrity checks.' if manifest.get(target.name) else 'Existing WAV passed RIFF header and length checks (no previous hash record).')
+    headers = {'Accept':'audio/*,application/octet-stream;q=0.8,*/*;q=0.3',
+               'Accept-Encoding':'identity',
+               'User-Agent':('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36' if item.flow else 'AudioRescue/3.0 (local personal backup utility)')}
+    if token: headers['Authorization'] = 'Bearer ' + token
+    if item.referer and hostname(item.referer) == hostname(item.url): headers['Referer'] = item.referer
+    opener = urllib.request.build_opener(RedirectGuard(auth_host if token else ''))
+    part = folder / ('.audio_rescue_' + secrets.token_hex(12) + '.part')
+    try:
+        for attempt in range(3):
+            try:
+                if cancel.is_set(): raise StoppedError('Stopped by user.')
+                request = urllib.request.Request(item.url, headers=headers)
+                with opener.open(request, timeout=40) as resp:
+                    ct = resp.headers.get('Content-Type','').lower().split(';')[0].strip()
+                    length = resp.headers.get('Content-Length','0') or '0'
+                    try: advertised = int(length)
+                    except (ValueError,TypeError): raise DownloadError('Server returned an invalid Content-Length header.') from None
+                    if advertised < 0 or advertised > MAX_AUDIO:
+                        raise DownloadError('Audio exceeds the 2 GiB per-file safety limit.')
+                    if ct in {'text/html','application/json','text/plain','application/xml'}:
+                        raise DownloadError('Link returned a webpage or error message, not audio. Copy the actual file link.')
+                    if resp.status == 206 or resp.headers.get('Content-Range'):
+                        raise DownloadError('The server returned only a partial response; full audio is required.')
+                    report(bytes_done=0, bytes_total=advertised)
+                    n=0; prefix=b''; digest=hashlib.sha256()
+                    with part.open('wb') as out:
+                        while True:
+                            if cancel.is_set(): raise StoppedError('Stopped by user.')
+                            block=resp.read(128*1024)
+                            if not block: break
+                            if len(prefix)<32: prefix += block[:32-len(prefix)]
+                            n+=len(block)
+                            if n > MAX_AUDIO:
+                                raise DownloadError('Audio exceeds the 2 GiB per-file safety limit.')
+                            out.write(block); digest.update(block)
+                            report(bytes_done=n)
+                    if advertised and n!=advertised:
+                        raise IncompleteDownload(f'Incomplete audio: {n:,} of {advertised:,} bytes.')
+                    identified=detect_format(prefix,ct,item.url,item.fmt)
+                    if not identified:
+                        raise DownloadError('Received bytes do not resemble a supported audio file.')
+                    if item.fmt and identified!=item.fmt:
+                        raise DownloadError(f'Site returned {identified.upper()}, not the requested {item.fmt.upper()}. No for
