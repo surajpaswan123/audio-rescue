@@ -1,0 +1,94 @@
+AUDIO RESCUE 3.0 - QA / RELEASE REPORT
+====================================
+Review date: 22 September 2026
+Reviewed baseline: Audio Rescue 2.0 ZIP
+
+SUMMARY
+-------
+The app has been revised and automatically tested offline. This report
+is not a guarantee of bug-free software. We have not tested your real
+Flow Music account, a full 200-song batch, or Windows/NVDA interaction
+inside this test environment. The Python source and test suite are
+provided so you can repeat the tests and review claims.
+
+IMPORTANT BUGS FOUND AND FIXED
+------------------------------
+1. Concurrent requests to Start could deadlock the local server. The v2
+   app tried to send a JSON response while holding the status mutex;
+   sending that response can deadlock under simultaneous starts.
+   Fixed by responding after releasing the lock. Regression tested.
+2. AAC ADTS streams could be wrongly identified as MP3 because the MP3
+   bitmask matched the broader AAC prefix. Fixed signature ordering and
+   frame pattern check. Regression tested.
+3. v2 skipped any already-existing WAV with a WAV header and >44 bytes,
+   even if it had been truncated halfway through. v3 verifies RIFF
+   length for older files; newly downloaded files additionally have a
+   local SHA-256 integrity record. Uncertain files are kept and the app
+   downloads a separate numbered copy. Regression tested.
+4. Incomplete HTTP responses were not retried. v3 retries truncated
+   responses, validates Content-Length and WAV RIFF length, and cleans
+   temporary files on failure. Regression tested.
+5. Cancellation during an active read was counted as a failed download.
+   v3 stops gracefully and keeps completed files. Regression tested.
+6. v2 Windows launcher could call an installed Python launcher without
+   a usable Python 3 or an outdated Python version. v3 checks 3.10+.
+7. v2 accepted missing Origin on write requests; v3 requires the local
+   browser origin and checks Host on all HTTP routes. Regression tested.
+8. Retry of HTTP 429 ignored Retry-After and could send requests too
+   quickly. v3 supports numeric Retry-After up to 60 seconds.
+9. Filename collision handling and temporary filenames improved. New
+   copies are numbered; temp files have random names. Regression tested.
+10. v3 checks short-lived JWT expiry before starting if the token has a
+    readable numeric exp claim. This is not token signature validation.
+
+TESTS
+-----
+40 offline Python unittest cases passed. They cover:
+- WAV, MP3, AAC, FLAC, OGG, M4A signature recognition
+- Invalid HTML, false content types, requested-vs-actual format
+- Flow Music IDs, duplicates, direct URL validation, templates, titles
+- Authorized header sent to the correct host only, redirect blocking
+- Successful downloads, SHA-256 records, existing-file skip
+- Corrupt/truncated existing copies preserved, numbered fresh copy
+- Length mismatch, WAV RIFF mismatch, retry after incomplete audio
+- HTTP 403 stopping, HTTP 429 retry, cancellation, partial cleanup
+- 2 GiB per-file limit and 200 links per batch
+- Local server response and simulated full direct-audio batch
+- Cross-origin POST rejection, forged Host rejection, body-size cap
+- Second Start while busy returns HTTP 409 without hanging
+- Basic semantic HTML labels, headings and live status checks
+
+Additional static checks: Python bytecode compilation; browser JavaScript
+syntax checked using Node.js. No third-party packages are needed to use the
+actual app. Test suite makes no live network calls.
+
+KNOWN LIMITATIONS
+-----------------
+- Actual Flow Music export endpoint is unofficial and could change.
+- Suno/Udio sharing pages are not automatically converted into files.
+- The app must receive an actual audio URL or supported endpoint.
+- A valid WAV file is not proof the original model rendered losslessly.
+- Client connection and server response may still fail after retries.
+- Only one batch per app instance; simultaneous app instances using the
+  same destination folder are not coordinated.
+- Generic direct-file downloads don't support OAuth consent, cookies,
+  anti-bot flows, or all providers' authentication mechanisms.
+- Browser interaction has not been audited with physical NVDA + Chrome
+  in this environment. Hands-on accessibility testing is advised.
+- Existing older WAVs can be checked for RIFF structure and length but
+  cannot be checked against a previously nonexistent source hash.
+- The app accepts downloads up to 2 GiB each, by design.
+
+SAFE RELEASE CHECKLIST
+----------------------
+On your Windows laptop:
+[ ] Extract ZIP, run START-WINDOWS.bat with Python 3.10+ installed.
+[ ] Verify labels, headings, status updates and buttons using NVDA.
+[ ] Test one of your own Flow Music WAV files and play it.
+[ ] Re-run same file and confirm skip; compare sizes with site response.
+[ ] Test a batch of 2-3 songs before attempting many.
+[ ] Test Stop then restart; finished files should be preserved.
+[ ] Try a bogus or expired token; error should not expose its contents.
+[ ] Test a direct HTTPS file link from a site you have permission to use.
+[ ] After testing, clear clipboard and revoke any previously exposed
+    session tokens. Do not publish logs containing credentials.
