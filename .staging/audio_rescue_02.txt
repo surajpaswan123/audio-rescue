@@ -1,0 +1,100 @@
+mat conversion performed.')
+                    if identified == 'wav' and prefix[:4] == b'RIFF':
+                        declared = int.from_bytes(prefix[4:8],'little') + 8
+                        if declared > n or declared < 44:
+                            raise IncompleteDownload('WAV header indicates a truncated or invalid file.')
+                    target=dest_path(folder,item,identified)
+                    if target.is_file() and valid_existing(target,item,identified,manifest.get(target.name)):
+                        return 'Skipped', ('Existing audio passed SHA-256 integrity checks.' if manifest.get(target.name) else 'Existing WAV passed RIFF header and length checks (no previous hash record).')
+                    target=unused_path(target)
+                    os.replace(part,target)
+                    manifest[target.name] = {'source':hashlib.sha256(item.url.encode()).hexdigest(),
+                                             'size':n,'sha256':digest.hexdigest()}
+                    try:
+                        manifest_save(folder,manifest)
+                    except OSError:
+                        return 'Downloaded', f'{target.name} — {n:,} bytes (warning: could not save local integrity record)'
+                    return 'Downloaded', f'{target.name} — {n:,} bytes'
+            except IncompleteDownload as e:
+                if attempt < 2 and not cancel.is_set():
+                    report(message=f'Audio was incomplete; retrying {item.label}...')
+                    if cancel.wait(2**attempt): raise StoppedError('Stopped by user.')
+                    continue
+                raise
+            except urllib.error.HTTPError as e:
+                if e.code in {401,403}:
+                    if token: raise AuthorizationError(f'HTTP {e.code}: token expired, lacks permission, or site requires other authentication.') from None
+                    raise DownloadError(f'HTTP {e.code}: this file requires access or the link has expired.') from None
+                if e.code in RETRYABLE and attempt<2:
+                    report(message=f'Temporary HTTP {e.code}; retrying {item.label}...')
+                    try: wait = min(60,max(1,int((e.headers or {}).get('Retry-After','') or 0)))
+                    except (ValueError,TypeError): wait = 2**attempt
+                    if cancel.wait(wait): raise StoppedError('Stopped by user.')
+                    continue
+                raise DownloadError(f'HTTP {e.code}: server refused the download.') from None
+            except (urllib.error.URLError,TimeoutError,socket.timeout,ConnectionError,http.client.IncompleteRead,OSError) as e:
+                if attempt<2 and not cancel.is_set():
+                    report(message=f'Connection issue; retrying {item.label}...')
+                    if cancel.wait(2**attempt):raise StoppedError('Stopped by user.')
+                    continue
+                if cancel.is_set():raise StoppedError('Stopped by user.') from None
+                raise DownloadError(f'Connection or file error ({type(e).__name__}).') from None
+            finally:
+                part.unlink(missing_ok=True)
+        raise DownloadError('Retries exhausted.')
+    finally:
+        part.unlink(missing_ok=True)
+
+
+def do_batch(items: list[Item], folder: Path, token: str, auth_host: str, cancel: threading.Event) -> None:
+    try:
+        folder.mkdir(parents=True,exist_ok=True)
+        for idx,item in enumerate(items,1):
+            if cancel.is_set():report(status='stopped',message='Stopped. Finished files were kept.');return
+            report(current=f'{idx} of {len(items)}: {item.label}',message=f'Downloading {item.label}...',bytes_done=0,bytes_total=0)
+            try:
+                status,why=download_one(item,folder,token,auth_host,cancel)
+                result(item.label,status,why)
+            except StoppedError:
+                report(status='stopped', current='', message='Stopped by user. Completed audio kept; partial file removed.')
+                return
+            except AuthorizationError as e:
+                result(item.label,'Failed',str(e))
+                report(status='stopped',current='',message='Authorization rejected. Sign in again and supply a fresh token for this platform. Already completed files remain saved.')
+                return
+            except DownloadError as e:
+                result(item.label,'Failed',str(e))
+            except Exception as e:
+                result(item.label,'Failed',f'Unexpected {type(e).__name__}; see the file or folder permissions.')
+        s=snapshot()
+        report(status='done',current='',bytes_done=0,bytes_total=0,
+               message=f"Finished: {s['done']} downloaded, {s['skipped']} skipped, {s['failed']} failed. Folder: {folder}")
+    except OSError:
+        report(status='stopped',message='Cannot create or write to this folder. Try your normal Downloads folder.')
+    finally:
+        token=''
+
+
+PAGE = r'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Audio Rescue — multi-platform audio downloader</title>
+<style>
+:root{font:100%/1.6 system-ui,Segoe UI,Arial,sans-serif;color-scheme:light dark}
+body{max-width:830px;margin:1rem auto;padding:0 1rem}h1,h2,h3{line-height:1.25}p{margin:.5rem 0 1rem}
+label{display:block;font-weight:650;margin:.9rem 0 .2rem}input,select,textarea,button{font:inherit;box-sizing:border-box}
+input,select,textarea{width:100%;padding:.55rem;border:1px solid #777;border-radius:.3rem}
+textarea{min-height:10rem}button{padding:.7rem 1.1rem;margin:.6rem .7rem .6rem 0;cursor:pointer}
+:focus-visible{outline:3px solid #2178dc;outline-offset:3px}small{display:block;margin:.2rem 0 .6rem}
+.notice{border-left:4px solid #777;padding:.7rem 1rem;background:rgba(127,127,127,.12)}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;padding:1rem;border:1px solid #777}progress{width:100%;height:1.3rem}
+li{margin:.5rem 0}details{margin:1rem 0}summary{cursor:pointer;font-weight:600}#results{padding-left:1.5rem}
+</style></head><body><main>
+<h1>Audio Rescue</h1><p><strong>Save your own songs and permitted audio files from different platforms.</strong> Accessible with NVDA, TalkBack and ordinary browsers. Runs on your computer, not an upload service.</p>
+<p class="notice">Select <strong>Flow Music</strong> for Flow Music song links; <strong>Direct audio links</strong> for files from other sites; or <strong>Advanced template</strong> for sites with a known direct download URL pattern. This app cannot turn every sharing page into an audio file, remove download limits, or unlock a format your account does not have.</p>
+<nav aria-label="Page sections"><a href="#guide">Beginner guide</a> · <a href="#downloader">Downloader</a> · <a href="#token-guide">Token instructions</a> · <a href="#other-sites">Other platforms</a></nav>
+<section id="guide"><h2>Start here — no technical experience needed</h2><ol>
+<li>Open the song on its original website. For Flow Music, the browser address is enough. For another site, look for its <strong>Download</strong> or <strong>Export</strong> menu.</li>
+<li>Copy a link: for Flow Music, press <kbd>Alt+D</kbd> then <kbd>Ctrl+C</kbd> on the song page. For another site, use <strong>Copy link address</strong> on an actual audio download link; a Share link normally leads to a webpage, not to WAV audio.</li>
+<li>Return here. Select the correct mode, then paste song links into the big box, <strong>one per line</strong>. Give each a name using <code>Song title | https://...</code> if you want.</li>
+<li>For Flow Music only, follow the <a href="#token-guide">token guide</a> and paste a fresh access token. This is not your account password. Never paste it into chats, email or screenshots.</li>
+<li>Choose WAV when your account offers original WAV, then press <strong>Start downloading</strong>. Keep the black command window open until the batch finishes.</li>
+<li>Open <strong>Downloads\Audio-Rescue</strong> in File Explorer to
